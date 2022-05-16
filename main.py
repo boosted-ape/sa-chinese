@@ -5,6 +5,7 @@ from keras.callbacks import ModelCheckpoint
 from keras import regularizers
 from matplotlib import collections
 from tensorflow_text import HubModuleTokenizer
+import tensorflow_text as tf_text
 import tensorflow as tf
 import collections
 import numpy
@@ -25,6 +26,11 @@ train_dataset_0 = tf.data.TextLineDataset(
 train_dataset_1 = tf.data.TextLineDataset(
     "/home/bj/sentiment-analysis/chnsenticorp/train/1/1.txt")
 
+test_dataset_0 = tf.data.TextLineDataset(
+    "/home/bj/sentiment-analysis/chnsenticorp/test/0/0.txt")
+test_dataset_1 = tf.data.TextLineDataset(
+    "/home/bj/sentiment-analysis/chnsenticorp/test/1/1.txt")
+
 MODEL_HANDLE = "https://tfhub.dev/google/zh_segmentation/1"
 segmenter = HubModuleTokenizer(MODEL_HANDLE)
 
@@ -34,59 +40,90 @@ def labeler(example, index):
 
 
 def configure_dataset(dataset):
-  return dataset.cache().prefetch(buffer_size=AUTOTUNE)
+    return dataset.cache().prefetch(buffer_size=AUTOTUNE)
 
 
-punc = "！？｡。＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏."
+punc = "！？｡。＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏.《"
 
 
+train_dataset_0 = train_dataset_0.map(
+    lambda x: tf.strings.regex_replace(x, "[%s]+" % punc, " "))
+train_dataset_1 = train_dataset_1.map(
+    lambda x: tf.strings.regex_replace(x, "[%s]+" % punc, " "))
 
-train_dataset_0 = train_dataset_0.map(lambda x: tf.strings.regex_replace(x, "[%s]+" %punc, " "))
-train_dataset_1 = train_dataset_1.map(lambda x: tf.strings.regex_replace(x, "[%s]+" %punc, " "))
+test_dataset_0 = test_dataset_0.map(
+    lambda x: tf.strings.regex_replace(x, "[%s]+" % punc, " "))
+test_dataset_1 = test_dataset_1.map(
+    lambda x: tf.strings.regex_replace(x, "[%s]+" % punc, " "))
 
-train_dataset_0 = train_dataset_0.map(lambda x: segmenter.tokenize(x))
-train_dataset_1 = train_dataset_1.map(lambda x: segmenter.tokenize(x))
 
 train_dataset_0 = train_dataset_0.map(lambda x: labeler(x, 0))
 train_dataset_1 = train_dataset_1.map(lambda x: labeler(x, 1))
 
+test_dataset_0 = test_dataset_0.map(lambda x: labeler(x, 0))
+test_dataset_1 = test_dataset_1.map(lambda x: labeler(x, 1))
+
 labeled_data_sets = [train_dataset_0, train_dataset_1]
-
-tokenised_ds = labeled_data_sets[0]
-for labeled_dataset in labeled_data_sets[1:]:
-    tokenised_ds = tokenised_ds.concatenate(labeled_dataset)
-
-tokenised_ds = tokenised_ds.shuffle(
+test_labeled_data_sets = test_dataset_0.concatenate(test_dataset_1)
+test_labeled_data_sets = test_labeled_data_sets.shuffle(
     BUFFER_SIZE, reshuffle_each_iteration=False)
+
+all_labeled_data = labeled_data_sets[0]
+for labeled_dataset in labeled_data_sets[1:]:
+    all_labeled_data = all_labeled_data.concatenate(labeled_dataset)
+
+all_labeled_data = all_labeled_data.shuffle(
+    BUFFER_SIZE, reshuffle_each_iteration=False)
+
+tokenised_ds = all_labeled_data.map(lambda x, y: segmenter.tokenize(x))
 
 tokenised_ds = configure_dataset(tokenised_ds)
 vocab_dict = collections.defaultdict(lambda: 0)
 for toks in tokenised_ds.as_numpy_iterator():
     for tok in toks:
-        if (type(tok) == numpy.ndarray):
-            for word in tok:
-                vocab_dict[word] += 1
+        vocab_dict[tok] += 1
 
 vocab = sorted(vocab_dict.items(), key=lambda x: x[1], reverse=True)
 vocab = [token for token, count in vocab]
 vocab = vocab[:VOCAB_SIZE]
 vocab_size = len(vocab)
 
-print("Vocab size: ", vocab_size)
-for i in range(5):
-    print(vocab[i].decode("utf-8"))
+
+keys = vocab
+values = range(2, len(vocab) + 2)
+init = tf.lookup.KeyValueTensorInitializer(
+    keys, values, key_dtype=tf.string, value_dtype=tf.int64)
+
+vocab_size += 2
+
+num_oov_buckets = 1
+vocab_table = tf.lookup.StaticVocabularyTable(init, num_oov_buckets)
+
+def preprocess_text(text, label):
+    tokenized = segmenter.tokenize(text)
+    vectorized = vocab_table.lookup(tokenized)
+    return vectorized, label
+
+all_encoded_data = all_labeled_data.map(preprocess_text)
+test_encoded_data = test_labeled_data_sets.map(preprocess_text)
+
+train_data = all_encoded_data.padded_batch(BATCH_SIZE)
+test_data = test_encoded_data.padded_batch(BATCH_SIZE)
+
+train_data = configure_dataset(train_data)
+test_data = configure_dataset(test_data)
 
 
 model = Sequential()
 model.add(layers.Embedding(VOCAB_SIZE, 20))
 model.add(layers.LSTM(15, dropout=0.5))
-model.add(layers.Dense(3, activation='relu'))
+model.add(layers.Dense(2, activation='relu'))
 
-model.compile(optimizer='rmsprop',
+model.compile(optimizer='adam',
               loss='binary_crossentropy', metrics=['accuracy'])
 
 checkpoint = ModelCheckpoint("model.hdf5", monitor='val_accuracy', verbose=1,
                              save_best_only=True, mode='auto', period=1, save_weights_only=False)
 
-# istory = model.fit(train_dataset, epochs=70, validation_data=(
-#   test_dataset), callbacks=[checkpoint])
+history = model.fit(train_data, epochs=3, validation_data=(
+   test_data))
