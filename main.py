@@ -153,9 +153,9 @@ export_model.compile(loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
 
 
 checkpoint = ModelCheckpoint("checkpoint/check.ckpt", monitor='val_accuracy', verbose=1,
-                             save_best_only=True, mode='auto', period=1, save_weights_only=True)
+                             save_best_only=True, mode='auto', save_freq='epoch', save_weights_only=True)
 
-history = export_model.fit(train_data, epochs=11, validation_data=(
+history = export_model.fit(train_data, epochs=5, validation_data=(
     test_data), validation_steps=10, callbacks=checkpoint)
 
 loss, accuracy = export_model.evaluate(test_ds)
