@@ -8,18 +8,18 @@ from tensorflow_text import HubModuleTokenizer
 import tensorflow_text as tf_text
 import tensorflow as tf
 import collections
-import numpy
+import io
 
 
 example_sentence = "（早报讯）我国对所有完成冠病疫苗接种者重开边境一个月来，樟宜机场接待了更多旅客，4月底的航空乘客量进一步增加至疫前水平的近40％，相比3月的约18％增加了超过一倍。乘客量下来几个月还会继续增长，相信今年内可如预期恢复到疫前水平的至少50%。交通部长易华仁今午（5月4日）在樟宜机场集团的“樟宜航空大奖”颁奖礼上致辞时指出，我国不仅要恢复以前的航空衔接，也要进一步扩大航空网络、增加航班的密集度，以及与航空公司建立新的伙伴关系。我国4月起实行简化的疫苗接种者旅游框架，所有已完成冠病疫苗接种的旅客，不论来自哪个国家或地区都可入境新加坡，4月26日起也不再须要接受行前冠病检测或隔离。"
 VOCAB_SIZE = 50000
 MAX_SEQUENCE_LENGTH = 250
-
 BUFFER_SIZE = 50000
 BATCH_SIZE = 64
 VALIDATION_SIZE = 5000
 AUTOTUNE = tf.data.AUTOTUNE
 
+checkpoint_dir = "checkpoint/check.ckpt"
 
 train_dataset_0 = tf.data.TextLineDataset(
     "/home/bj/sentiment-analysis/chnsenticorp/train/0/0.txt")
@@ -111,6 +111,7 @@ def preprocess_text(text, label):
     vectorized = vocab_table.lookup(tokenized)
     return vectorized, label
 
+
 preprocess_layer = layers.TextVectorization(
     max_tokens=vocab_size,
     split=segmenter.tokenize,
@@ -118,17 +119,22 @@ preprocess_layer = layers.TextVectorization(
     output_sequence_length=MAX_SEQUENCE_LENGTH)
 
 preprocess_layer.set_vocabulary(vocab)
+vocab_to_disk = preprocess_layer.get_vocabulary()
 
 
+all_encoded_data = all_labeled_data.map(preprocess_text)
+test_encoded_data = test_labeled_data_sets.map(preprocess_text)
 
-#all_encoded_data = all_labeled_data.map(preprocess_text)
-#test_encoded_data = test_labeled_data_sets.map(preprocess_text)
+raw_train_data = all_labeled_data.padded_batch(BATCH_SIZE)
+raw_test_data = test_labeled_data_sets.padded_batch(BATCH_SIZE)
 
-train_data = all_labeled_data.padded_batch(BATCH_SIZE)
-test_data = test_labeled_data_sets.padded_batch(BATCH_SIZE)
+train_data = all_encoded_data.padded_batch(BATCH_SIZE)
+test_data = test_encoded_data.padded_batch(BATCH_SIZE)
 
 train_data = configure_dataset(train_data)
 test_data = configure_dataset(test_data)
+
+raw_test_data = configure_dataset(raw_test_data)
 
 test_ds = test_labeled_data_sets.take(832).batch(BATCH_SIZE)
 test_ds = configure_dataset(test_ds)
@@ -145,21 +151,45 @@ model = Sequential([
     tf.keras.layers.Dense(1)
 ])
 
-export_model = Sequential([preprocess_layer, model])
 
-export_model.compile(loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+model.compile(loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
               optimizer=tf.keras.optimizers.Adam(1e-4),
               metrics=['accuracy'])
 
 
-checkpoint = ModelCheckpoint("checkpoint/check.ckpt", monitor='val_accuracy', verbose=1,
-                             save_best_only=True, mode='auto', save_freq='epoch', save_weights_only=True)
+checkpoint = ModelCheckpoint(checkpoint_dir, monitor='val_accuracy', verbose=1,
+                             save_best_only=True, mode='auto', save_freq="epoch", save_weights_only=True)
 
-history = export_model.fit(train_data, epochs=5, validation_data=(
+
+history = model.fit(train_data, epochs=5, validation_data=(
     test_data), validation_steps=10, callbacks=checkpoint)
 
-loss, accuracy = export_model.evaluate(test_ds)
+model.summary()
+
+export_model = Sequential([preprocess_layer, model])
+export_model.compile(loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+              optimizer=tf.keras.optimizers.Adam(1e-4),
+              metrics=['accuracy'])
+
+loss, accuracy = export_model.evaluate(raw_test_data)
 
 print("Loss: ", loss)
 print("Accuracy: {:2.2%}".format(accuracy))
 
+model.save("save_model/my_model")
+out_m = io.open('metadata.tsv', 'w', encoding='utf-8')
+
+for index, word in enumerate(vocab_to_disk):
+    if index == 0:
+        continue  # skip 0, it's padding.
+    out_m.write(word + "\n")
+out_m.close()
+
+new_model = Sequential([preprocess_layer,tf.keras.models.load_model("save_model/my_model")])
+new_model.compile(loss=tf.keras.losses.BinaryCrossentropy(from_logits=True),
+              optimizer=tf.keras.optimizers.Adam(1e-4),
+              metrics=['accuracy'])
+loss, accuracy = new_model.evaluate(raw_test_data)
+
+print("Loss: ", loss)
+print("Accuracy: {:2.2%}".format(accuracy))
